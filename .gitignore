@@ -1,0 +1,25 @@
+@"
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+dist/
+build/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Virtual envs
+env/
+venv/
+.venv/
+
+# Slicer / runtime artifacts
+*.pyc
+"@ > .gitignore
