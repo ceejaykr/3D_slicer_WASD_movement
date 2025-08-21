@@ -1,4 +1,4 @@
-# WASD View Transform
+# 3D Slicer WASD View Transform module
 
 A minimal 3D Slicer ScriptedLoadableModule that enables camera-relative keyboard controls:
 W/A/S/D = move in view plane, Q/E = rotate about camera focal point.
