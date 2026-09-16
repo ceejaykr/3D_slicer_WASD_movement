@@ -7,6 +7,7 @@
 #   W/S = up/down (screen)
 #   A/D = left/right (screen)  <- LEFT/RIGHT inverted per user's request
 #   Q/E = rotate (CW/CCW) ABOUT the camera's focal point  <- rotation direction inverted
+#   Shift + any of the above = slow (precision) movement; factor adjustable in the panel
 #
 # Saves/uses a Linear Transform named "WASD_ViewTransform".
 #
@@ -22,7 +23,8 @@ class WASDviewTransform(ScriptedLoadableModule):
         self.parent.categories = ["Transforms"]
         self.parent.dependencies = []
         self.parent.contributors = ["Bianca (for Jun)"]
-        self.parent.helpText = "W/A/S/D translate in view plane; Q/E rotate about camera focal point. Creates 'WASD_ViewTransform'."
+        self.parent.helpText = ("W/A/S/D translate in view plane; Q/E rotate about camera focal point. "
+                                "Hold Shift for slow (precision) movement. Creates 'WASD_ViewTransform'.")
         self.parent.acknowledgementText = "Camera-relative WASD transform."
 
 class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
@@ -52,6 +54,15 @@ class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
         self.targetSelector.removeEnabled = False
         formLayout.addRow("Target node:", self.targetSelector)
 
+        # Shift slow-down factor (fraction of normal speed while Shift is held)
+        self.slowFactorSpinBox = qt.QDoubleSpinBox()
+        self.slowFactorSpinBox.setRange(0.01, 1.0)
+        self.slowFactorSpinBox.setSingleStep(0.05)
+        self.slowFactorSpinBox.setDecimals(2)
+        self.slowFactorSpinBox.setValue(WASDviewController.SLOW_FACTOR)
+        self.slowFactorSpinBox.toolTip = "Speed multiplier applied while Shift is held (0.25 = quarter speed)."
+        formLayout.addRow("Shift slow factor:", self.slowFactorSpinBox)
+
         # Start / Stop
         row = qt.QHBoxLayout()
         self.startButton = qt.QPushButton("Start (capture WASD/QE)")
@@ -68,6 +79,11 @@ class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
         self.controller = None
         self.startButton.clicked.connect(self.onStart)
         self.stopButton.clicked.connect(self.onStop)
+        self.slowFactorSpinBox.valueChanged.connect(self.onSlowFactorChanged)
+
+    def onSlowFactorChanged(self, value):
+        if self.controller:
+            self.controller.slowFactor = float(value)
 
     def onStart(self):
         target = self.targetSelector.currentNode()
@@ -78,10 +94,12 @@ class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
             self.controller.disable()
             self.controller = None
         self.controller = WASDviewController(target)
+        self.controller.slowFactor = float(self.slowFactorSpinBox.value)
         self.controller.enable()
         self.startButton.enabled = False
         self.stopButton.enabled = True
-        self.statusLabel.text = "Active: click 3D view and press W/A/S/D (translate) Q/E (rotate about view center)."
+        self.statusLabel.text = ("Active: click 3D view and press W/A/S/D (translate) Q/E (rotate about view center). "
+                                 "Hold Shift to move slowly.")
 
     def onStop(self):
         if self.controller:
@@ -132,15 +150,18 @@ class WASDviewController(qt.QObject):
        preserving any existing parent transform (so chain becomes: target -> WASD_ViewTransform -> oldParent -> ...).
      - applies left-multiplied translations/rotations in world coordinates using camera axes.
      - rotation pivot is camera focal point (dynamic each tick).
+     - holding Shift multiplies translation and rotation speed by slowFactor (precision mode).
     """
 
     TICK_HZ = 60.0
     TRANSLATION_MM_PER_SEC = 24.0
     ROTATION_DEG_PER_SEC = 36.0
+    SLOW_FACTOR = 0.25   # speed multiplier while Shift is held
 
     def __init__(self, targetNode):
         super().__init__()
         self.targetNode = targetNode
+        self.slowFactor = self.SLOW_FACTOR
         self.timer = qt.QTimer()
         self.timer.setInterval(int(1000.0 / self.TICK_HZ))
         self.timer.timeout.connect(self.onTick)
@@ -204,6 +225,8 @@ class WASDviewController(qt.QObject):
         slicer.util.showStatusMessage("WASD view controller stopped", 1500)
 
     def eventFilter(self, obj, event):
+        # Qt reports the same key code (e.g. Key_W) with or without Shift, so Shift+W is
+        # captured here exactly like W. The Shift key itself is not consumed.
         et = event.type()
         if et == qt.QEvent.KeyPress and not event.isAutoRepeat():
             key = int(event.key())
@@ -216,6 +239,14 @@ class WASDviewController(qt.QObject):
                 self._pressed.discard(key)
                 return True
         return False
+
+    def _shiftHeld(self):
+        """Poll the live modifier state so Shift works whether pressed before or after a movement key."""
+        try:
+            mods = qt.QApplication.keyboardModifiers()
+            return bool(int(mods) & int(qt.Qt.ShiftModifier))
+        except Exception:
+            return False
 
     def onTick(self):
         if not self._pressed:
@@ -242,8 +273,9 @@ class WASDviewController(qt.QObject):
                   up[2]*fwd[0] - up[0]*fwd[2],
                   up[0]*fwd[1] - up[1]*fwd[0] ]
 
-        tstep = self.TRANSLATION_MM_PER_SEC / self.TICK_HZ
-        rstep = self.ROTATION_DEG_PER_SEC / self.TICK_HZ
+        speed = self.slowFactor if self._shiftHeld() else 1.0
+        tstep = self.TRANSLATION_MM_PER_SEC / self.TICK_HZ * speed
+        rstep = self.ROTATION_DEG_PER_SEC / self.TICK_HZ * speed
 
         # TRANSLATION: NOTE left/right inverted per request:
         # W = up, S = down (unchanged)
