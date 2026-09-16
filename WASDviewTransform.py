@@ -132,7 +132,7 @@ class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
         self.axisLog = qt.QPlainTextEdit()
         self.axisLog.setReadOnly(True)
         self.axisLog.setMaximumHeight(90)
-        self.axisLog.setPlaceholderText("Distance moved will be shown here.")
+        self.axisLog.setPlaceholderText("Click Start above, then Move UP / Move DOWN. Distance moved is shown here.")
         axisLayout.addRow(self.axisLog)
 
         self._pointsNode = None
@@ -142,7 +142,6 @@ class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
         self.pointsSelector.currentNodeChanged.connect(self.onPointsNodeChanged)
         self.upPointCombo.currentIndexChanged.connect(self.onAxisSelectionChanged)
         self.downPointCombo.currentIndexChanged.connect(self.onAxisSelectionChanged)
-        self.targetSelector.currentNodeChanged.connect(self.onAxisSelectionChanged)
         self.moveUpButton.clicked.connect(lambda: self.onMoveAlongAxis(+1.0))
         self.moveDownButton.clicked.connect(lambda: self.onMoveAlongAxis(-1.0))
         self.onPointsNodeChanged(self.pointsSelector.currentNode())
@@ -217,23 +216,37 @@ class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
         return [c / length for c in v], length
 
     def onAxisSelectionChanged(self, *args):
+        self._netAlongAxisMm = 0.0
+        self._updateAxisButtons()
+
+    def _updateAxisButtons(self):
+        """Buttons are active only while the controller is running (Start pressed) and the axis is valid."""
         axis, _ = self._axisDefinition()
-        ok = axis is not None and self.targetSelector.currentNode() is not None
+        ok = (self.controller is not None) and (axis is not None)
         self.moveUpButton.enabled = ok
         self.moveDownButton.enabled = ok
-        self._netAlongAxisMm = 0.0
+        if self.controller is None:
+            self.moveUpButton.toolTip = "Click Start first."
+            self.moveDownButton.toolTip = "Click Start first."
+        elif axis is None:
+            self.moveUpButton.toolTip = "Select two different points for UP and DOWN."
+            self.moveDownButton.toolTip = "Select two different points for UP and DOWN."
+        else:
+            name = self.controller.targetNode.GetName()
+            self.moveUpButton.toolTip = "Move '%s' one step toward the UP point." % name
+            self.moveDownButton.toolTip = "Move '%s' one step toward the DOWN point." % name
 
     def onMoveAlongAxis(self, sign):
-        target = self.targetSelector.currentNode()
-        if not target:
-            slicer.util.errorDisplay("Please select a target node first.")
+        if self.controller is None:
+            slicer.util.errorDisplay("Click Start first; the UP/DOWN buttons move the started node.")
             return
         axis, axisLength = self._axisDefinition()
         if axis is None:
             slicer.util.errorDisplay("Select two different points for UP and DOWN.")
             return
         step = float(self.stepSpinBox.value)
-        txNode = _ensure_wasd_transform(target)
+        target = self.controller.targetNode
+        txNode = self.controller.txNode
         t = [axis[i] * step * sign for i in range(3)]
         M = vtk.vtkMatrix4x4(); txNode.GetMatrixTransformToParent(M)
         T = vtk.vtkMatrix4x4(); T.Identity()
@@ -244,8 +257,8 @@ class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
         self._netAlongAxisMm += step * sign
         direction = "UP" if sign > 0 else "DOWN"
         self.axisLog.appendPlainText(
-            "Moved %.2f mm toward %s   (net along axis: %+.2f mm; UP-DOWN distance %.2f mm)"
-            % (step, direction, self._netAlongAxisMm, axisLength))
+            "%s: moved %.2f mm toward %s   (net along axis: %+.2f mm; UP-DOWN distance %.2f mm)"
+            % (target.GetName(), step, direction, self._netAlongAxisMm, axisLength))
         sb = self.axisLog.verticalScrollBar()
         sb.setValue(sb.maximum)
 
@@ -264,6 +277,8 @@ class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
         self.stopButton.enabled = True
         self.statusLabel.text = ("Active: click 3D view and press W/A/S/D (translate) Q/E (rotate about view center). "
                                  "Hold Shift to move slowly.")
+        self._netAlongAxisMm = 0.0
+        self._updateAxisButtons()
 
     def onStop(self):
         if self.controller:
@@ -272,6 +287,7 @@ class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
         self.startButton.enabled = True
         self.stopButton.enabled = False
         self.statusLabel.text = "Stopped."
+        self._updateAxisButtons()
 
     def cleanup(self):
         self.onStop()

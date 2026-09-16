@@ -14,10 +14,11 @@ Hold **Shift** with any key for slow (precision) movement; the multiplier
 ### Point axis (UP / DOWN)
 Place two control points in a point list (e.g. condylion and gonion). In **Point axis**,
 select the point list, choose which point is **UP** and which is **DOWN**, set the **Step** (mm),
-and click **▲ Move UP** or **▼ Move DOWN**. The target node moves along the DOWN→UP axis by one
-step per click (no need to press Start), and the log below shows the distance moved, the net
-displacement along the axis, and the UP–DOWN distance. Movement goes into the same
-`WASD_ViewTransform`, so it combines with keyboard moves.
+and click **▲ Move UP** or **▼ Move DOWN**. The buttons are greyed out until you click **Start**;
+they then move the node selected at the top (the started node) along the DOWN→UP axis by one step
+per click, and the log below shows the node name, the distance moved, the net displacement along the
+axis, and the UP–DOWN distance. Movement goes into the same `WASD_ViewTransform`, so it combines
+with keyboard moves.
 
 ## License
 MIT
