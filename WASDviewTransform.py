@@ -9,6 +9,10 @@
 #   Q/E = rotate (CW/CCW) ABOUT the camera's focal point  <- rotation direction inverted
 #   Shift + any of the above = slow (precision) movement; factor adjustable in the panel
 #
+# Point axis (panel): pick two control points of a point list as UP and DOWN; the
+#   "Move UP" / "Move DOWN" buttons translate the target along the DOWN->UP axis by a
+#   fixed step and log the distance moved.
+#
 # Saves/uses a Linear Transform named "WASD_ViewTransform".
 #
 
@@ -24,7 +28,9 @@ class WASDviewTransform(ScriptedLoadableModule):
         self.parent.dependencies = []
         self.parent.contributors = ["Bianca (for Jun)"]
         self.parent.helpText = ("W/A/S/D translate in view plane; Q/E rotate about camera focal point. "
-                                "Hold Shift for slow (precision) movement. Creates 'WASD_ViewTransform'.")
+                                "Hold Shift for slow (precision) movement. "
+                                "Point axis: choose UP and DOWN control points and step the target along that axis. "
+                                "Creates 'WASD_ViewTransform'.")
         self.parent.acknowledgementText = "Camera-relative WASD transform."
 
 class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
@@ -81,9 +87,167 @@ class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
         self.stopButton.clicked.connect(self.onStop)
         self.slowFactorSpinBox.valueChanged.connect(self.onSlowFactorChanged)
 
+        # ---------------- Point axis: move along DOWN -> UP defined by two control points ----------------
+        axisCollapsible = ctk.ctkCollapsibleButton()
+        axisCollapsible.setText("Point axis (UP / DOWN)")
+        self.layout.addWidget(axisCollapsible)
+        axisLayout = qt.QFormLayout()
+        axisCollapsible.setLayout(axisLayout)
+
+        self.pointsSelector = slicer.qMRMLNodeComboBox()
+        self.pointsSelector.setMRMLScene(slicer.mrmlScene)
+        self.pointsSelector.nodeTypes = ["vtkMRMLMarkupsFiducialNode"]
+        self.pointsSelector.noneEnabled = True
+        self.pointsSelector.addEnabled = True
+        self.pointsSelector.removeEnabled = False
+        self.pointsSelector.toolTip = "Point list containing (at least) the two points that define the axis."
+        axisLayout.addRow("Point list:", self.pointsSelector)
+
+        self.upPointCombo = qt.QComboBox()
+        self.upPointCombo.toolTip = "Control point that marks the UP end of the axis."
+        axisLayout.addRow("UP point:", self.upPointCombo)
+
+        self.downPointCombo = qt.QComboBox()
+        self.downPointCombo.toolTip = "Control point that marks the DOWN end of the axis."
+        axisLayout.addRow("DOWN point:", self.downPointCombo)
+
+        self.stepSpinBox = qt.QDoubleSpinBox()
+        self.stepSpinBox.setRange(0.01, 500.0)
+        self.stepSpinBox.setSingleStep(0.5)
+        self.stepSpinBox.setDecimals(2)
+        self.stepSpinBox.setValue(1.0)
+        self.stepSpinBox.setSuffix(" mm")
+        self.stepSpinBox.toolTip = "Distance moved per button click."
+        axisLayout.addRow("Step:", self.stepSpinBox)
+
+        btnRow = qt.QHBoxLayout()
+        self.moveUpButton = qt.QPushButton("▲ Move UP")
+        self.moveDownButton = qt.QPushButton("▼ Move DOWN")
+        self.moveUpButton.enabled = False
+        self.moveDownButton.enabled = False
+        btnRow.addWidget(self.moveUpButton)
+        btnRow.addWidget(self.moveDownButton)
+        axisLayout.addRow(btnRow)
+
+        self.axisLog = qt.QPlainTextEdit()
+        self.axisLog.setReadOnly(True)
+        self.axisLog.setMaximumHeight(90)
+        self.axisLog.setPlaceholderText("Distance moved will be shown here.")
+        axisLayout.addRow(self.axisLog)
+
+        self._pointsNode = None
+        self._pointsObserverTags = []
+        self._netAlongAxisMm = 0.0
+
+        self.pointsSelector.currentNodeChanged.connect(self.onPointsNodeChanged)
+        self.upPointCombo.currentIndexChanged.connect(self.onAxisSelectionChanged)
+        self.downPointCombo.currentIndexChanged.connect(self.onAxisSelectionChanged)
+        self.targetSelector.currentNodeChanged.connect(self.onAxisSelectionChanged)
+        self.moveUpButton.clicked.connect(lambda: self.onMoveAlongAxis(+1.0))
+        self.moveDownButton.clicked.connect(lambda: self.onMoveAlongAxis(-1.0))
+        self.onPointsNodeChanged(self.pointsSelector.currentNode())
+
     def onSlowFactorChanged(self, value):
         if self.controller:
             self.controller.slowFactor = float(value)
+
+    # ---------------- Point axis helpers ----------------
+
+    def onPointsNodeChanged(self, node):
+        # drop observers on the previous node
+        if self._pointsNode is not None:
+            for tag in self._pointsObserverTags:
+                try:
+                    self._pointsNode.RemoveObserver(tag)
+                except Exception:
+                    pass
+        self._pointsObserverTags = []
+        self._pointsNode = node
+        if node is not None:
+            for ev in (slicer.vtkMRMLMarkupsNode.PointAddedEvent,
+                       slicer.vtkMRMLMarkupsNode.PointRemovedEvent,
+                       slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent):
+                try:
+                    self._pointsObserverTags.append(node.AddObserver(ev, self._onPointsModified))
+                except Exception:
+                    pass
+        self._netAlongAxisMm = 0.0
+        self.refreshPointCombos()
+
+    def _onPointsModified(self, caller=None, event=None):
+        self.refreshPointCombos()
+
+    def refreshPointCombos(self):
+        upPrev = self.upPointCombo.currentText
+        downPrev = self.downPointCombo.currentText
+        labels = []
+        if self._pointsNode is not None:
+            n = self._pointsNode.GetNumberOfControlPoints()
+            for i in range(n):
+                label = self._pointsNode.GetNthControlPointLabel(i) or ("Point %d" % (i + 1))
+                labels.append(label)
+        for combo, prev, default in ((self.upPointCombo, upPrev, 0), (self.downPointCombo, downPrev, 1)):
+            combo.blockSignals(True)
+            combo.clear()
+            for label in labels:
+                combo.addItem(label)
+            idx = combo.findText(prev) if prev else -1
+            if idx < 0:
+                idx = default if default < len(labels) else (len(labels) - 1)
+            combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
+        self.onAxisSelectionChanged()
+
+    def _axisDefinition(self):
+        """Return (unit vector DOWN->UP in world coords, axis length mm) or (None, 0)."""
+        if self._pointsNode is None:
+            return None, 0.0
+        iUp = self.upPointCombo.currentIndex
+        iDown = self.downPointCombo.currentIndex
+        n = self._pointsNode.GetNumberOfControlPoints()
+        if iUp < 0 or iDown < 0 or iUp >= n or iDown >= n or iUp == iDown:
+            return None, 0.0
+        pUp = [0.0, 0.0, 0.0]; pDown = [0.0, 0.0, 0.0]
+        self._pointsNode.GetNthControlPointPositionWorld(iUp, pUp)
+        self._pointsNode.GetNthControlPointPositionWorld(iDown, pDown)
+        v = [pUp[i] - pDown[i] for i in range(3)]
+        length = math.sqrt(sum(c * c for c in v))
+        if length < 1e-6:
+            return None, 0.0
+        return [c / length for c in v], length
+
+    def onAxisSelectionChanged(self, *args):
+        axis, _ = self._axisDefinition()
+        ok = axis is not None and self.targetSelector.currentNode() is not None
+        self.moveUpButton.enabled = ok
+        self.moveDownButton.enabled = ok
+        self._netAlongAxisMm = 0.0
+
+    def onMoveAlongAxis(self, sign):
+        target = self.targetSelector.currentNode()
+        if not target:
+            slicer.util.errorDisplay("Please select a target node first.")
+            return
+        axis, axisLength = self._axisDefinition()
+        if axis is None:
+            slicer.util.errorDisplay("Select two different points for UP and DOWN.")
+            return
+        step = float(self.stepSpinBox.value)
+        txNode = _ensure_wasd_transform(target)
+        t = [axis[i] * step * sign for i in range(3)]
+        M = vtk.vtkMatrix4x4(); txNode.GetMatrixTransformToParent(M)
+        T = vtk.vtkMatrix4x4(); T.Identity()
+        T.SetElement(0, 3, t[0]); T.SetElement(1, 3, t[1]); T.SetElement(2, 3, t[2])
+        newM = vtk.vtkMatrix4x4(); vtk.vtkMatrix4x4.Multiply4x4(T, M, newM)
+        txNode.SetMatrixTransformToParent(newM)
+
+        self._netAlongAxisMm += step * sign
+        direction = "UP" if sign > 0 else "DOWN"
+        self.axisLog.appendPlainText(
+            "Moved %.2f mm toward %s   (net along axis: %+.2f mm; UP-DOWN distance %.2f mm)"
+            % (step, direction, self._netAlongAxisMm, axisLength))
+        sb = self.axisLog.verticalScrollBar()
+        sb.setValue(sb.maximum)
 
     def onStart(self):
         target = self.targetSelector.currentNode()
@@ -111,6 +275,7 @@ class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
 
     def cleanup(self):
         self.onStop()
+        self.onPointsNodeChanged(None)
 
 class WASDviewTransformLogic(ScriptedLoadableModuleLogic):
     pass
@@ -141,6 +306,43 @@ def _get_active_threeD_view():
     except Exception:
         return None
 
+# ----------------------- Shared transform insertion -----------------------
+
+def _ensure_wasd_transform(targetNode):
+    """
+    Find or create the LinearTransform 'WASD_ViewTransform' and make it the direct parent of
+    targetNode, preserving any existing parent (chain: target -> WASD_ViewTransform -> oldParent -> ...).
+    Returns the transform node. Idempotent: if the target is already under it, nothing changes.
+    """
+    nodes = slicer.util.getNodesByClass("vtkMRMLLinearTransformNode")
+    wasdTx = None
+    iterable = nodes.values() if isinstance(nodes, dict) else (nodes or [])
+    for n in iterable:
+        try:
+            if n.GetName() == "WASD_ViewTransform":
+                wasdTx = n
+                break
+        except Exception:
+            continue
+    if wasdTx is None:
+        wasdTx = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "WASD_ViewTransform")
+
+    oldParent = targetNode.GetParentTransformNode()
+    if oldParent is not None and oldParent.GetID() == wasdTx.GetID():
+        return wasdTx  # already inserted
+    if oldParent is not None:
+        try:
+            wasdTx.SetAndObserveTransformNodeID(oldParent.GetID())
+        except Exception:
+            wasdTx.SetAttribute("ParentTransformID", oldParent.GetID())
+    else:
+        try:
+            wasdTx.SetAndObserveTransformNodeID(None)
+        except Exception:
+            pass
+    targetNode.SetAndObserveTransformNodeID(wasdTx.GetID())
+    return wasdTx
+
 # ----------------------- Controller (correct insertion + camera pivot) -----------------------
 
 class WASDviewController(qt.QObject):
@@ -168,44 +370,8 @@ class WASDviewController(qt.QObject):
         self._pressed = set()
         self._installed = False
 
-        # 1) find or create transform node (unique name to avoid conflicts)
-        nodes = slicer.util.getNodesByClass("vtkMRMLLinearTransformNode")
-        wasdTx = None
-        if isinstance(nodes, dict):
-            for n in nodes.values():
-                try:
-                    if n.GetName() == "WASD_ViewTransform":
-                        wasdTx = n
-                        break
-                except Exception:
-                    continue
-        elif isinstance(nodes, list):
-            for n in nodes:
-                try:
-                    if n.GetName() == "WASD_ViewTransform":
-                        wasdTx = n
-                        break
-                except Exception:
-                    continue
-        if wasdTx is None:
-            wasdTx = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "WASD_ViewTransform")
-        self.txNode = wasdTx
-
-        # 2) Insert transform correctly:
-        #    If target had parent P: we want chain target -> txNode -> P -> ...
-        #    So set txNode's parent to P, then set target's parent to txNode.
-        oldParent = self.targetNode.GetParentTransformNode()
-        if oldParent is not None:
-            try:
-                self.txNode.SetAndObserveTransformNodeID(oldParent.GetID())
-            except Exception:
-                self.txNode.SetAttribute("ParentTransformID", oldParent.GetID())
-        else:
-            try:
-                self.txNode.SetAndObserveTransformNodeID(None)
-            except Exception:
-                pass
-        self.targetNode.SetAndObserveTransformNodeID(self.txNode.GetID())
+        # find/create 'WASD_ViewTransform' and insert it as the target's direct parent
+        self.txNode = _ensure_wasd_transform(self.targetNode)
 
     def enable(self):
         if not self._installed:
