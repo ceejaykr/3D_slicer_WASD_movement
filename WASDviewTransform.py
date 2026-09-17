@@ -13,7 +13,7 @@
 #   "Move UP" / "Move DOWN" buttons translate the target along the DOWN->UP axis by a
 #   fixed step and log the distance moved.
 #
-# Saves/uses a Linear Transform named "WASD_ViewTransform".
+# Each target node gets its own Linear Transform named "WASD_<target name>".
 #
 
 import math
@@ -30,7 +30,8 @@ class WASDviewTransform(ScriptedLoadableModule):
         self.parent.helpText = ("W/A/S/D translate in view plane; Q/E rotate about camera focal point. "
                                 "Hold Shift for slow (precision) movement. "
                                 "Point axis: choose UP and DOWN control points and step the target along that axis. "
-                                "Creates 'WASD_ViewTransform'.")
+                                "Works on models, segmentations, volumes and markups (planes, points, curves). "
+                                "Each target gets its own transform 'WASD_<target name>'.")
         self.parent.acknowledgementText = "Camera-relative WASD transform."
 
 class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
@@ -51,6 +52,7 @@ class WASDviewTransformWidget(ScriptedLoadableModuleWidget):
         self.targetSelector.nodeTypes = [
             "vtkMRMLSegmentationNode",
             "vtkMRMLModelNode",
+            "vtkMRMLMarkupsNode",  # planes, point lists, lines, curves, ROIs
             "vtkMRMLScalarVolumeNode",
             "vtkMRMLVectorVolumeNode",
             "vtkMRMLLabelMapVolumeNode",
@@ -324,48 +326,46 @@ def _get_active_threeD_view():
 
 # ----------------------- Shared transform insertion -----------------------
 
+def _has_children(transformNode):
+    """True if any node (including another transform) is directly under transformNode."""
+    for node in slicer.util.getNodesByClass("vtkMRMLTransformableNode"):
+        if node.GetTransformNodeID() == transformNode.GetID():
+            return True
+    return False
+
+
 def _ensure_wasd_transform(targetNode):
     """
-    Find or create the LinearTransform 'WASD_ViewTransform' and make it the direct parent of
-    targetNode, preserving any existing parent (chain: target -> WASD_ViewTransform -> oldParent -> ...).
-    Returns the transform node. Idempotent: if the target is already under it, nothing changes.
+    Return the LinearTransform that drives targetNode, inserted as its direct parent and preserving
+    any existing parent (chain: target -> WASD_<target> -> oldParent -> ...).
+    Each target gets its own transform that starts at identity, so starting on a node never applies
+    movements made to another node. The transform is reused while the target is still under it; after
+    the target has been hardened it is reset to identity before reuse.
     """
-    nodes = slicer.util.getNodesByClass("vtkMRMLLinearTransformNode")
-    wasdTx = None
-    iterable = nodes.values() if isinstance(nodes, dict) else (nodes or [])
-    for n in iterable:
-        try:
-            if n.GetName() == "WASD_ViewTransform":
-                wasdTx = n
-                break
-        except Exception:
-            continue
-    if wasdTx is None:
-        wasdTx = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "WASD_ViewTransform")
-
-    oldParent = targetNode.GetParentTransformNode()
-    if oldParent is not None and oldParent.GetID() == wasdTx.GetID():
-        return wasdTx  # already inserted
-    if oldParent is not None:
-        try:
-            wasdTx.SetAndObserveTransformNodeID(oldParent.GetID())
-        except Exception:
-            wasdTx.SetAttribute("ParentTransformID", oldParent.GetID())
+    scene = slicer.mrmlScene
+    txNode = scene.GetNodeByID(targetNode.GetAttribute("WASD.TransformID") or "")
+    parent = targetNode.GetParentTransformNode()
+    if txNode is not None and parent is not None and parent.GetID() == txNode.GetID():
+        return txNode  # already driving this target
+    if txNode is not None and _has_children(txNode):
+        txNode = None  # still holding other nodes; leave it alone
+    if txNode is None:
+        txNode = scene.AddNewNodeByClass("vtkMRMLLinearTransformNode",
+                                         scene.GenerateUniqueName("WASD_" + targetNode.GetName()))
+        targetNode.SetAttribute("WASD.TransformID", txNode.GetID())
     else:
-        try:
-            wasdTx.SetAndObserveTransformNodeID(None)
-        except Exception:
-            pass
-    targetNode.SetAndObserveTransformNodeID(wasdTx.GetID())
-    return wasdTx
+        txNode.SetMatrixTransformToParent(vtk.vtkMatrix4x4())  # identity
+    txNode.SetAndObserveTransformNodeID(parent.GetID() if parent is not None else None)
+    targetNode.SetAndObserveTransformNodeID(txNode.GetID())
+    return txNode
 
 # ----------------------- Controller (correct insertion + camera pivot) -----------------------
 
 class WASDviewController(qt.QObject):
     """
     Controller that:
-     - places a LinearTransform (WASD_ViewTransform) as the direct parent of the target node,
-       preserving any existing parent transform (so chain becomes: target -> WASD_ViewTransform -> oldParent -> ...).
+     - places the target's own LinearTransform (WASD_<target>) as its direct parent,
+       preserving any existing parent transform (so chain becomes: target -> WASD_<target> -> oldParent -> ...).
      - applies left-multiplied translations/rotations in world coordinates using camera axes.
      - rotation pivot is camera focal point (dynamic each tick).
      - holding Shift multiplies translation and rotation speed by slowFactor (precision mode).
@@ -386,7 +386,7 @@ class WASDviewController(qt.QObject):
         self._pressed = set()
         self._installed = False
 
-        # find/create 'WASD_ViewTransform' and insert it as the target's direct parent
+        # find/create the target's 'WASD_<target>' transform and insert it as its direct parent
         self.txNode = _ensure_wasd_transform(self.targetNode)
 
     def enable(self):
